@@ -130,6 +130,11 @@ def setup_csv_files():
 
     if not os.path.exists(MASTER_CSV):
         pd.DataFrame(columns=MASTER_COLUMNS).to_csv(MASTER_CSV, index=False)
+    else:
+        # Recreate the CSV if the schema is outdated.
+        existing_cols = pd.read_csv(MASTER_CSV, nrows=0).columns.tolist()
+        if existing_cols != MASTER_COLUMNS:
+            pd.DataFrame(columns=MASTER_COLUMNS).to_csv(MASTER_CSV, index=False)
 
 
 setup_csv_files()
@@ -226,6 +231,8 @@ def cancel_form():
 
 def is_already_verified(campaign_id, caqh_id):
     df = pd.read_csv(MASTER_CSV, dtype=str)
+    if "campaign_id" not in df.columns or "caqh_id" not in df.columns:
+        return False
     mask = (df["campaign_id"] == campaign_id) & (df["caqh_id"] == caqh_id)
     existing = df[mask]
     if existing.empty:
