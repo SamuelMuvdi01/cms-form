@@ -53,7 +53,6 @@ MASTER_COLUMNS = [
     "practice_location_suite_response",
     "practice_accepting_new_patients_response",
     "practice_accepting_new_medicare_patients_response",
-    "enriched_provider_currently_practicing_value",
     "enriched_provider_speciality_category_value",
     "enriched_phone_number_value",
     "enriched_practice_location_name_value",
@@ -82,7 +81,6 @@ CALLER_REPORT_COLUMNS = [
     "practice_location_suite_response",
     "practice_accepting_new_patients_response",
     "practice_accepting_new_medicare_patients_response",
-    "enriched_provider_currently_practicing_value",
     "enriched_provider_speciality_category_value",
     "enriched_phone_number_value",
     "enriched_practice_location_name_value",
@@ -106,7 +104,6 @@ REQUIRED_FIELDS = [
     "practice_location_suite_response",
     "practice_accepting_new_patients_response",
     "practice_accepting_new_medicare_patients_response",
-    "enriched_provider_currently_practicing_value",
     "enriched_provider_speciality_category_value",
 ]
 
@@ -122,7 +119,6 @@ FIELD_LABELS = {
     "practice_location_suite_response": "Is the practice location suite correct?",
     "practice_accepting_new_patients_response": "Is the accepting new patients information correct?",
     "practice_accepting_new_medicare_patients_response": "Is the accepting Medicare patients information correct?",
-    "enriched_provider_currently_practicing_value": "Enriched provider currently practicing value",
     "enriched_provider_speciality_category_value": "Enriched specialty category value",
 }
 
@@ -497,10 +493,6 @@ def survey_page():
 
         st.caption("Required fields capture confirmed or corrected values. Optional fields are for corrections only.")
 
-        enriched_provider_currently_practicing_value = st.text_input(
-            "Provider currently practicing value *"
-        )
-
         enriched_provider_speciality_category_value = st.text_input(
             "Specialty category value *"
         )
@@ -554,7 +546,6 @@ def survey_page():
             "practice_location_suite_response":             correct_incorrect_to_bool(practice_location_suite_response),
             "practice_accepting_new_patients_response":     correct_incorrect_to_bool(practice_accepting_new_patients_response),
             "practice_accepting_new_medicare_patients_response": correct_incorrect_to_bool(practice_accepting_new_medicare_patients_response),
-            "enriched_provider_currently_practicing_value": enriched_provider_currently_practicing_value.strip(),
             "enriched_provider_speciality_category_value":  enriched_provider_speciality_category_value.strip(),
             "enriched_phone_number_value":                  enriched_phone_number_value.strip(),
             "enriched_practice_location_name_value":        enriched_practice_location_name_value.strip(),
