@@ -4,14 +4,26 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+from databricks import sql
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 # ======================================================
-# FILE CONFIG
+# DB CONFIG
 # ======================================================
 
-USERS_CSV = "users.csv"
-MASTER_CSV = "master_responses.csv"
+CATALOG = "cat_dev_dq.master_responses"
+
+
+@st.cache_resource
+def get_db_connection():
+    return sql.connect(
+        server_hostname=os.environ["DATABRICKS_SERVER_HOSTNAME"],
+        http_path=os.environ["DATABRICKS_HTTP_PATH"],
+        access_token=os.environ["DATABRICKS_TOKEN"],
+    )
 
 
 # ======================================================
@@ -76,7 +88,7 @@ MASTER_COLUMNS = [
     "enriched_phone_number_value",
     "enriched_practice_location_name_value",
     "enriched_practice_street_line_1_value",
-    "enriched_practice_Street_line_2_suite_value",
+    "enriched_practice_street_line_2_suite_value",
     "enriched_practice_city_value",
     "enriched_practice_zip_value",
     "enriched_practice_state_value",
@@ -106,7 +118,7 @@ CALLER_REPORT_COLUMNS = [
     "enriched_phone_number_value",
     "enriched_practice_location_name_value",
     "enriched_practice_street_line_1_value",
-    "enriched_practice_Street_line_2_suite_value",
+    "enriched_practice_street_line_2_suite_value",
     "enriched_practice_city_value",
     "enriched_practice_zip_value",
     "enriched_practice_state_value",
@@ -140,30 +152,6 @@ st.set_page_config(
     page_icon="📝",
     layout="wide"
 )
-
-
-# ======================================================
-# CREATE STARTER CSV FILES
-# ======================================================
-
-def setup_csv_files():
-    if not os.path.exists(USERS_CSV):
-        users = pd.DataFrame([
-            {"caller_id": "admin",     "password": "admin123",  "role": "admin"},
-            {"caller_id": "caller001", "password": "caller123", "role": "caller"},
-            {"caller_id": "caller002", "password": "caller456", "role": "caller"},
-        ])
-        users.to_csv(USERS_CSV, index=False)
-
-    if not os.path.exists(MASTER_CSV):
-        pd.DataFrame(columns=MASTER_COLUMNS).to_csv(MASTER_CSV, index=False)
-    else:
-        existing_cols = pd.read_csv(MASTER_CSV, nrows=0).columns.tolist()
-        if existing_cols != MASTER_COLUMNS:
-            pd.DataFrame(columns=MASTER_COLUMNS).to_csv(MASTER_CSV, index=False)
-
-
-setup_csv_files()
 
 
 # ======================================================
@@ -205,14 +193,16 @@ def to_bool(val):
 
 
 def check_login(caller_id, password):
-    users = pd.read_csv(USERS_CSV, dtype=str)
-    match = users[
-        (users["caller_id"] == caller_id.strip()) &
-        (users["password"] == password)
-    ]
-    if match.empty:
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT caller_id, role FROM {CATALOG}.users WHERE caller_id = %s AND password = %s",
+            [caller_id.strip(), password]
+        )
+        row = cursor.fetchone()
+    if row is None:
         return None
-    return match.iloc[0].to_dict()
+    return {"caller_id": row[0], "role": row[1]}
 
 
 def clear_form_state():
@@ -256,57 +246,180 @@ def cancel_form():
 
 
 def is_already_verified(campaign_id, caqh_id):
-    df = pd.read_csv(MASTER_CSV, dtype=str)
-    if "campaign_id" not in df.columns or "caqh_id" not in df.columns:
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT verification_complete
+            FROM {CATALOG}.master_responses
+            WHERE campaign_id = %s AND caqh_id = %s
+            """,
+            [campaign_id, caqh_id]
+        )
+        row = cursor.fetchone()
+    if row is None:
         return False
-    mask = (df["campaign_id"] == campaign_id) & (df["caqh_id"] == caqh_id)
-    existing = df[mask]
-    if existing.empty:
-        return False
-    return str(existing.iloc[0]["verification_complete"]).strip().lower() == "true"
+    return row[0] is True
 
 
 def upsert_response(row):
-    today = datetime.now().strftime("%Y-%m-%d")
-    df = pd.read_csv(MASTER_CSV, dtype=str)
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"""
+            MERGE INTO {CATALOG}.master_responses AS target
+            USING (
+                SELECT
+                    %s                    AS caller_id,
+                    %s                    AS campaign_id,
+                    %s                    AS caqh_id,
+                    %s                    AS can_proceed_with_call,
+                    CAST(%s AS TIMESTAMP) AS form_start_time,
+                    CAST(%s AS TIMESTAMP) AS form_submission_time,
+                    %s                    AS form_total_time_minutes,
+                    %s                    AS verification_complete,
+                    %s                    AS provider_currently_practicing_response,
+                    %s                    AS provider_speciality_category_response,
+                    %s                    AS phone_number_correct_response,
+                    %s                    AS practice_location_name_response,
+                    %s                    AS practice_location_address_response,
+                    %s                    AS practice_location_suite_response,
+                    %s                    AS practice_accepting_new_patients_response,
+                    %s                    AS practice_accepting_new_medicare_patients_response,
+                    %s                    AS enriched_provider_speciality_category_value,
+                    %s                    AS enriched_phone_number_value,
+                    %s                    AS enriched_practice_location_name_value,
+                    %s                    AS enriched_practice_street_line_1_value,
+                    %s                    AS enriched_practice_street_line_2_suite_value,
+                    %s                    AS enriched_practice_city_value,
+                    %s                    AS enriched_practice_zip_value,
+                    %s                    AS enriched_practice_state_value,
+                    %s                    AS standard_comments,
+                    %s                    AS unique_comments
+            ) AS source
+            ON target.campaign_id = source.campaign_id
+            AND target.caqh_id    = source.caqh_id
 
-    mask = (df["campaign_id"] == row["campaign_id"]) & (df["caqh_id"] == row["caqh_id"])
-    existing_idx = df.index[mask].tolist()
+            WHEN MATCHED THEN UPDATE SET
+                target.caller_id                                         = source.caller_id,
+                target.can_proceed_with_call                             = source.can_proceed_with_call,
+                target.form_start_time                                   = source.form_start_time,
+                target.form_submission_time                              = source.form_submission_time,
+                target.form_total_time_minutes                           = source.form_total_time_minutes,
+                target.verification_complete                             = source.verification_complete,
+                target.provider_currently_practicing_response            = source.provider_currently_practicing_response,
+                target.provider_speciality_category_response             = source.provider_speciality_category_response,
+                target.phone_number_correct_response                     = source.phone_number_correct_response,
+                target.practice_location_name_response                   = source.practice_location_name_response,
+                target.practice_location_address_response                = source.practice_location_address_response,
+                target.practice_location_suite_response                  = source.practice_location_suite_response,
+                target.practice_accepting_new_patients_response          = source.practice_accepting_new_patients_response,
+                target.practice_accepting_new_medicare_patients_response = source.practice_accepting_new_medicare_patients_response,
+                target.enriched_provider_speciality_category_value       = source.enriched_provider_speciality_category_value,
+                target.enriched_phone_number_value                       = source.enriched_phone_number_value,
+                target.enriched_practice_location_name_value             = source.enriched_practice_location_name_value,
+                target.enriched_practice_street_line_1_value             = source.enriched_practice_street_line_1_value,
+                target.enriched_practice_street_line_2_suite_value       = source.enriched_practice_street_line_2_suite_value,
+                target.enriched_practice_city_value                      = source.enriched_practice_city_value,
+                target.enriched_practice_zip_value                       = source.enriched_practice_zip_value,
+                target.enriched_practice_state_value                     = source.enriched_practice_state_value,
+                target.standard_comments                                 = source.standard_comments,
+                target.unique_comments                                   = source.unique_comments,
+                target.attempt_date_1 = COALESCE(target.attempt_date_1, CURRENT_DATE()),
+                target.attempt_date_2 = CASE
+                                            WHEN target.attempt_date_1 IS NOT NULL
+                                             AND target.attempt_date_2 IS NULL
+                                            THEN CURRENT_DATE()
+                                            ELSE target.attempt_date_2
+                                        END,
+                target.attempt_date_3 = CASE
+                                            WHEN target.attempt_date_2 IS NOT NULL
+                                             AND target.attempt_date_3 IS NULL
+                                            THEN CURRENT_DATE()
+                                            ELSE target.attempt_date_3
+                                        END
 
-    if not existing_idx:
-        row["attempt_date_1"] = today
-        row["attempt_date_2"] = ""
-        row["attempt_date_3"] = ""
-        df = pd.concat([df, pd.DataFrame([row], columns=MASTER_COLUMNS)], ignore_index=True)
-    else:
-        idx = existing_idx[0]
-        d1 = str(df.at[idx, "attempt_date_1"]).strip()
-        d2 = str(df.at[idx, "attempt_date_2"]).strip()
-        d3 = str(df.at[idx, "attempt_date_3"]).strip()
+            WHEN NOT MATCHED THEN INSERT (
+                caller_id, campaign_id, caqh_id,
+                can_proceed_with_call, form_start_time, form_submission_time,
+                form_total_time_minutes, verification_complete,
+                provider_currently_practicing_response, provider_speciality_category_response,
+                phone_number_correct_response, practice_location_name_response,
+                practice_location_address_response, practice_location_suite_response,
+                practice_accepting_new_patients_response, practice_accepting_new_medicare_patients_response,
+                enriched_provider_speciality_category_value, enriched_phone_number_value,
+                enriched_practice_location_name_value, enriched_practice_street_line_1_value,
+                enriched_practice_street_line_2_suite_value, enriched_practice_city_value,
+                enriched_practice_zip_value, enriched_practice_state_value,
+                standard_comments, unique_comments,
+                attempt_date_1, attempt_date_2, attempt_date_3
+            ) VALUES (
+                source.caller_id, source.campaign_id, source.caqh_id,
+                source.can_proceed_with_call, source.form_start_time, source.form_submission_time,
+                source.form_total_time_minutes, source.verification_complete,
+                source.provider_currently_practicing_response, source.provider_speciality_category_response,
+                source.phone_number_correct_response, source.practice_location_name_response,
+                source.practice_location_address_response, source.practice_location_suite_response,
+                source.practice_accepting_new_patients_response, source.practice_accepting_new_medicare_patients_response,
+                source.enriched_provider_speciality_category_value, source.enriched_phone_number_value,
+                source.enriched_practice_location_name_value, source.enriched_practice_street_line_1_value,
+                source.enriched_practice_street_line_2_suite_value, source.enriched_practice_city_value,
+                source.enriched_practice_zip_value, source.enriched_practice_state_value,
+                source.standard_comments, source.unique_comments,
+                CURRENT_DATE(), NULL, NULL
+            )
+            """,
+            [
+                row["caller_id"],
+                row["campaign_id"],
+                row["caqh_id"],
+                row["can_proceed_with_call"],
+                row["form_start_time"],
+                row["form_submission_time"],
+                row["form_total_time_minutes"],
+                row["verification_complete"],
+                row["provider_currently_practicing_response"],
+                row["provider_speciality_category_response"],
+                row["phone_number_correct_response"],
+                row["practice_location_name_response"],
+                row["practice_location_address_response"],
+                row["practice_location_suite_response"],
+                row["practice_accepting_new_patients_response"],
+                row["practice_accepting_new_medicare_patients_response"],
+                row["enriched_provider_speciality_category_value"],
+                row["enriched_phone_number_value"],
+                row["enriched_practice_location_name_value"],
+                row["enriched_practice_street_line_1_value"],
+                row["enriched_practice_street_line_2_suite_value"],
+                row["enriched_practice_city_value"],
+                row["enriched_practice_zip_value"],
+                row["enriched_practice_state_value"],
+                row["standard_comments"],
+                row["unique_comments"],
+            ]
+        )
 
-        for col in MASTER_COLUMNS:
-            if col not in ("attempt_date_1", "attempt_date_2", "attempt_date_3") and col in row:
-                df.at[idx, col] = row[col]
+        # Read back the stamped attempt dates so the caller report is complete.
+        cursor.execute(
+            f"""
+            SELECT attempt_date_1, attempt_date_2, attempt_date_3
+            FROM {CATALOG}.master_responses
+            WHERE campaign_id = %s AND caqh_id = %s
+            """,
+            [row["campaign_id"], row["caqh_id"]]
+        )
+        dates = cursor.fetchone()
 
-        if not d1 or d1 == "nan":
-            df.at[idx, "attempt_date_1"] = today
-            df.at[idx, "attempt_date_2"] = ""
-            df.at[idx, "attempt_date_3"] = ""
-        elif not d2 or d2 == "nan":
-            df.at[idx, "attempt_date_2"] = today
-        elif not d3 or d3 == "nan":
-            df.at[idx, "attempt_date_3"] = today
+    if dates:
+        row["attempt_date_1"] = str(dates[0]) if dates[0] else ""
+        row["attempt_date_2"] = str(dates[1]) if dates[1] else ""
+        row["attempt_date_3"] = str(dates[2]) if dates[2] else ""
 
-        row["attempt_date_1"] = str(df.at[idx, "attempt_date_1"])
-        row["attempt_date_2"] = str(df.at[idx, "attempt_date_2"])
-        row["attempt_date_3"] = str(df.at[idx, "attempt_date_3"])
-
-    df.to_csv(MASTER_CSV, index=False)
     return row
 
 
 def make_caller_report(row):
-    report_row = {col: row[col] for col in CALLER_REPORT_COLUMNS}
+    report_row = {col: row.get(col, "") for col in CALLER_REPORT_COLUMNS}
     return pd.DataFrame([report_row]).to_csv(index=False)
 
 
@@ -320,10 +433,7 @@ def show_errors(errors):
 # ======================================================
 
 def login_page():
-    st.title("🔐 Provider Survey Login")
-
-    st.write("Demo users:")
-    st.code("admin / admin123\ncaller001 / caller123\ncaller002 / caller456")
+    st.title("Provider Survey Login")
 
     with st.form("login_form"):
         caller_id = st.text_input("Caller ID")
@@ -495,7 +605,7 @@ def survey_page_2():
 
 
 # ======================================================
-# SURVEY — PAGE 3: Practice Name, Practicing Status & Specialty
+# SURVEY — PAGE 3: Provider Identity & Practicing Status
 # ======================================================
 
 def survey_page_3():
@@ -713,7 +823,7 @@ def survey_page_6():
         row = {
             "caller_id":                                         st.session_state.caller_id,
             "campaign_id":                                       st.session_state.get("p1_campaign_id", "").strip(),
-            "can_proceed_with_call":                             st.session_state.get("p2_can_continue", ""),
+            "can_proceed_with_call":                             to_bool(st.session_state.get("p2_can_continue")),
             "form_start_time":                                   st.session_state.form_start_time,
             "form_submission_time":                              submission_time,
             "form_total_time_minutes":                           total_minutes,
@@ -734,7 +844,7 @@ def survey_page_6():
             "enriched_phone_number_value":                       st.session_state.get("p2_phone_enrichment", "").strip() if phone_no else "",
             "enriched_practice_location_name_value":             st.session_state.get("p2_name_enrichment", "").strip() if name_no else "",
             "enriched_practice_street_line_1_value":             st.session_state.get("p4_addr_line1", "").strip() if addr_no else "",
-            "enriched_practice_Street_line_2_suite_value":       st.session_state.get("p4_suite_enrichment", "").strip() if suite_no else "",
+            "enriched_practice_street_line_2_suite_value":       st.session_state.get("p4_suite_enrichment", "").strip() if suite_no else "",
             "enriched_practice_city_value":                      st.session_state.get("p4_city", "").strip() if addr_no else "",
             "enriched_practice_zip_value":                       st.session_state.get("p4_zip", "").strip() if addr_no else "",
             "enriched_practice_state_value":                     st.session_state.get("p4_state", "") if addr_no else "",
@@ -782,7 +892,7 @@ def survey_page():
 # ======================================================
 
 def admin_page():
-    st.title("📊 Admin Page")
+    st.title("Admin Page")
 
     if st.session_state.role != "admin":
         st.error("You do not have access to this page.")
@@ -794,7 +904,15 @@ def admin_page():
 
     st.divider()
 
-    df = pd.read_csv(MASTER_CSV, dtype=str)
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT * FROM {CATALOG}.master_responses ORDER BY form_submission_time DESC"
+        )
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+
+    df = pd.DataFrame(rows, columns=columns)
     st.write(f"Total records: **{len(df)}**")
     st.dataframe(df, use_container_width=True, hide_index=True)
 
