@@ -119,7 +119,7 @@ FORM_KEYS = [
     "p1_campaign_id", "p1_caqh_id",
     "p2_phone_correct", "p2_phone_enrichment",
     "p2_can_continue",
-    "p3_name_correct", "p3_name_enrichment",
+    "p2_name_correct", "p2_name_enrichment",
     "p3_currently_practicing",
     "p3_specialty_correct", "p3_specialty_enrichment",
     "p4_address_correct",
@@ -397,8 +397,6 @@ def nav_buttons(back_page=None):
 # ======================================================
 
 def survey_page_1():
-    st.title("Call Metadata")
-
     st.info(f"Caller ID: **{st.session_state.caller_id}**")
     st.text_input("Campaign ID *", key="p1_campaign_id")
     st.text_input("CAQHID (Copy & Paste here) *", key="p1_caqh_id")
@@ -428,11 +426,11 @@ def survey_page_1():
 # ======================================================
 
 def survey_page_2():
-    st.title("Phone Number Validation")
+    st.title("Practice Location Name and Number Validation")
 
     # Q3 — Phone number
     st.radio(
-        "Is the phone number correct?  *",
+        "Is the phone number correct? *",
         YES_NO,
         key="p2_phone_correct",
         index=None,
@@ -452,6 +450,22 @@ def survey_page_2():
         horizontal=True
     )
 
+    # Q5 — Practice name (only shown when caller can proceed)
+    if st.session_state.get("p2_can_continue") == "Yes":
+        st.divider()
+        st.radio(
+            "Is the practice name correct? *",
+            YES_NO,
+            key="p2_name_correct",
+            index=None,
+            horizontal=True
+        )
+        if st.session_state.get("p2_name_correct") == "No":
+            st.text_input(
+                "If no, what is the correct practice location name? *",
+                key="p2_name_enrichment"
+            )
+
     if nav_buttons(back_page=1):
         errors = []
         if not st.session_state.get("p2_phone_correct"):
@@ -461,6 +475,12 @@ def survey_page_2():
             errors.append("Correct phone number is required.")
         if not st.session_state.get("p2_can_continue"):
             errors.append('"Can you proceed with verification?" is required.')
+        if st.session_state.get("p2_can_continue") == "Yes":
+            if not st.session_state.get("p2_name_correct"):
+                errors.append("Practice name verification is required.")
+            if st.session_state.get("p2_name_correct") == "No" and \
+                    not st.session_state.get("p2_name_enrichment", "").strip():
+                errors.append("Correct practice location name is required.")
 
         if errors:
             show_errors(errors)
@@ -480,22 +500,6 @@ def survey_page_2():
 
 def survey_page_3():
     st.title("Provider Identity & Practicing Status")
-
-    # Q5 — Practice name
-    st.radio(
-        "Is the practice name correct? *",
-        YES_NO,
-        key="p3_name_correct",
-        index=None,
-        horizontal=True
-    )
-    if st.session_state.get("p3_name_correct") == "No":
-        st.text_input(
-            "If no, what is the correct practice location name? *",
-            key="p3_name_enrichment"
-        )
-
-    st.divider()
 
     # Q6 — Currently practicing (Yes/No only, no enrichment)
     st.radio(
@@ -521,11 +525,6 @@ def survey_page_3():
 
     if nav_buttons(back_page=2):
         errors = []
-        if not st.session_state.get("p3_name_correct"):
-            errors.append("Practice name verification is required.")
-        if st.session_state.get("p3_name_correct") == "No" and \
-                not st.session_state.get("p3_name_enrichment", "").strip():
-            errors.append("Correct practice location name is required.")
         if not st.session_state.get("p3_currently_practicing"):
             errors.append("Practicing status is required.")
         if not st.session_state.get("p3_specialty_correct"):
@@ -699,7 +698,7 @@ def survey_page_6():
         suite_no     = st.session_state.get("p4_suite_correct")   == "No"
         specialty_no = st.session_state.get("p3_specialty_correct") == "No"
         phone_no     = st.session_state.get("p2_phone_correct")   == "No"
-        name_no      = st.session_state.get("p3_name_correct")    == "No"
+        name_no      = st.session_state.get("p2_name_correct")    == "No"
 
         row = {
             "caller_id":                                         st.session_state.caller_id,
@@ -716,14 +715,14 @@ def survey_page_6():
             "provider_currently_practicing_response":            to_bool(st.session_state.get("p3_currently_practicing")),
             "provider_speciality_category_response":             to_bool(st.session_state.get("p3_specialty_correct")),
             "phone_number_correct_response":                     to_bool(st.session_state.get("p2_phone_correct")),
-            "practice_location_name_response":                   to_bool(st.session_state.get("p3_name_correct")),
+            "practice_location_name_response":                   to_bool(st.session_state.get("p2_name_correct")),
             "practice_location_address_response":                to_bool(st.session_state.get("p4_address_correct")),
             "practice_location_suite_response":                  to_bool(st.session_state.get("p4_suite_correct")),
             "practice_accepting_new_patients_response":          to_bool(st.session_state.get("p5_accepting_new")),
             "practice_accepting_new_medicare_patients_response": to_bool(st.session_state.get("p5_accepting_medicare")),
             "enriched_provider_speciality_category_value":       st.session_state.get("p3_specialty_enrichment", "").strip() if specialty_no else "",
             "enriched_phone_number_value":                       st.session_state.get("p2_phone_enrichment", "").strip() if phone_no else "",
-            "enriched_practice_location_name_value":             st.session_state.get("p3_name_enrichment", "").strip() if name_no else "",
+            "enriched_practice_location_name_value":             st.session_state.get("p2_name_enrichment", "").strip() if name_no else "",
             "enriched_practice_street_line_1_value":             st.session_state.get("p4_addr_line1", "").strip() if addr_no else "",
             "enriched_practice_Street_line_2_suite_value":       st.session_state.get("p4_suite_enrichment", "").strip() if suite_no else "",
             "enriched_practice_city_value":                      st.session_state.get("p4_city", "").strip() if addr_no else "",
