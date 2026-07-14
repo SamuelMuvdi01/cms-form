@@ -660,7 +660,13 @@ def survey_page_6():
         )
 
     # Q12 — Verification complete
-    st.checkbox("Verification complete", key="p6_verification_complete")
+    st.radio(
+        "Verification complete? *",
+        YES_NO,
+        key="p6_verification_complete",
+        index=None,
+        horizontal=True
+    )
 
     st.divider()
 
@@ -691,6 +697,10 @@ def survey_page_6():
         submit = st.button("Submit", type="primary", use_container_width=True)
 
     if submit:
+        if not st.session_state.get("p6_verification_complete"):
+            st.error("Verification complete is required.")
+            st.stop()
+
         submission_time = now_text()
         total_minutes = round((time.time() - st.session_state.form_start_epoch) / 60)
 
@@ -710,7 +720,7 @@ def survey_page_6():
             "attempt_date_1":                                    "",
             "attempt_date_2":                                    "",
             "attempt_date_3":                                    "",
-            "verification_complete":                             st.session_state.get("p6_verification_complete", False),
+            "verification_complete":                             to_bool(st.session_state.get("p6_verification_complete")),
             "caqh_id":                                           st.session_state.get("p1_caqh_id", "").strip(),
             "provider_currently_practicing_response":            to_bool(st.session_state.get("p3_currently_practicing")),
             "provider_speciality_category_response":             to_bool(st.session_state.get("p3_specialty_correct")),
