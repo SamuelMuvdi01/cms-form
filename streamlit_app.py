@@ -258,143 +258,114 @@ def update_queue_record(record_id, verification_complete):
 
 def upsert_response(row):
     conn = get_db_connection()
+    params = [
+        row["record_queue_id"],
+        row["caller_id"],
+        row["can_proceed_with_call"],
+        row["form_start_time"],
+        row["form_submission_time"],
+        row["form_total_time_minutes"],
+        row["verification_complete"],
+        row["provider_currently_practicing_response"],
+        row["provider_speciality_category_response"],
+        row["phone_number_correct_response"],
+        row["practice_location_name_response"],
+        row["practice_location_address_response"],
+        row["practice_location_suite_response"],
+        row["practice_accepting_new_patients_response"],
+        row["practice_accepting_new_medicare_patients_response"],
+        row["enriched_provider_speciality_category_value"],
+        row["enriched_phone_number_value"],
+        row["enriched_practice_location_name_value"],
+        row["enriched_practice_street_line_1_value"],
+        row["enriched_practice_street_line_2_suite_value"],
+        row["enriched_practice_city_value"],
+        row["enriched_practice_zip_value"],
+        row["enriched_practice_state_value"],
+        row["standard_comments"],
+        row["unique_comments"],
+    ]
+
     with conn.cursor() as cursor:
         cursor.execute(
-            f"""
-            MERGE INTO {CATALOG}.master_responses AS target
-            USING (
-                SELECT
-                    %s                    AS record_queue_id,
-                    %s                    AS caller_id,
-                    %s                    AS campaign_id,
-                    %s                    AS caqh_id,
-                    %s                    AS can_proceed_with_call,
-                    CAST(%s AS TIMESTAMP) AS form_start_time,
-                    CAST(%s AS TIMESTAMP) AS form_submission_time,
-                    %s                    AS form_total_time_minutes,
-                    %s                    AS verification_complete,
-                    %s                    AS provider_currently_practicing_response,
-                    %s                    AS provider_speciality_category_response,
-                    %s                    AS phone_number_correct_response,
-                    %s                    AS practice_location_name_response,
-                    %s                    AS practice_location_address_response,
-                    %s                    AS practice_location_suite_response,
-                    %s                    AS practice_accepting_new_patients_response,
-                    %s                    AS practice_accepting_new_medicare_patients_response,
-                    %s                    AS enriched_provider_speciality_category_value,
-                    %s                    AS enriched_phone_number_value,
-                    %s                    AS enriched_practice_location_name_value,
-                    %s                    AS enriched_practice_street_line_1_value,
-                    %s                    AS enriched_practice_street_line_2_suite_value,
-                    %s                    AS enriched_practice_city_value,
-                    %s                    AS enriched_practice_zip_value,
-                    %s                    AS enriched_practice_state_value,
-                    %s                    AS standard_comments,
-                    %s                    AS unique_comments
-            ) AS source
-            ON target.campaign_id = source.campaign_id
-            AND target.caqh_id    = source.caqh_id
-
-            WHEN MATCHED THEN UPDATE SET
-                target.record_queue_id                                   = source.record_queue_id,
-                target.caller_id                                         = source.caller_id,
-                target.can_proceed_with_call                             = source.can_proceed_with_call,
-                target.form_start_time                                   = source.form_start_time,
-                target.form_submission_time                              = source.form_submission_time,
-                target.form_total_time_minutes                           = source.form_total_time_minutes,
-                target.verification_complete                             = source.verification_complete,
-                target.provider_currently_practicing_response            = source.provider_currently_practicing_response,
-                target.provider_speciality_category_response             = source.provider_speciality_category_response,
-                target.phone_number_correct_response                     = source.phone_number_correct_response,
-                target.practice_location_name_response                   = source.practice_location_name_response,
-                target.practice_location_address_response                = source.practice_location_address_response,
-                target.practice_location_suite_response                  = source.practice_location_suite_response,
-                target.practice_accepting_new_patients_response          = source.practice_accepting_new_patients_response,
-                target.practice_accepting_new_medicare_patients_response = source.practice_accepting_new_medicare_patients_response,
-                target.enriched_provider_speciality_category_value       = source.enriched_provider_speciality_category_value,
-                target.enriched_phone_number_value                       = source.enriched_phone_number_value,
-                target.enriched_practice_location_name_value             = source.enriched_practice_location_name_value,
-                target.enriched_practice_street_line_1_value             = source.enriched_practice_street_line_1_value,
-                target.enriched_practice_street_line_2_suite_value       = source.enriched_practice_street_line_2_suite_value,
-                target.enriched_practice_city_value                      = source.enriched_practice_city_value,
-                target.enriched_practice_zip_value                       = source.enriched_practice_zip_value,
-                target.enriched_practice_state_value                     = source.enriched_practice_state_value,
-                target.standard_comments                                 = source.standard_comments,
-                target.unique_comments                                   = source.unique_comments,
-                target.attempt_date_1 = COALESCE(target.attempt_date_1, CURRENT_DATE()),
-                target.attempt_date_2 = CASE
-                                            WHEN target.attempt_date_1 IS NOT NULL
-                                             AND target.attempt_date_2 IS NULL
-                                            THEN CURRENT_DATE()
-                                            ELSE target.attempt_date_2
-                                        END,
-                target.attempt_date_3 = CASE
-                                            WHEN target.attempt_date_2 IS NOT NULL
-                                             AND target.attempt_date_3 IS NULL
-                                            THEN CURRENT_DATE()
-                                            ELSE target.attempt_date_3
-                                        END
-
-            WHEN NOT MATCHED THEN INSERT (
-                record_queue_id, caller_id, campaign_id, caqh_id,
-                can_proceed_with_call, form_start_time, form_submission_time,
-                form_total_time_minutes, verification_complete,
-                provider_currently_practicing_response, provider_speciality_category_response,
-                phone_number_correct_response, practice_location_name_response,
-                practice_location_address_response, practice_location_suite_response,
-                practice_accepting_new_patients_response, practice_accepting_new_medicare_patients_response,
-                enriched_provider_speciality_category_value, enriched_phone_number_value,
-                enriched_practice_location_name_value, enriched_practice_street_line_1_value,
-                enriched_practice_street_line_2_suite_value, enriched_practice_city_value,
-                enriched_practice_zip_value, enriched_practice_state_value,
-                standard_comments, unique_comments,
-                attempt_date_1, attempt_date_2, attempt_date_3
-            ) VALUES (
-                source.record_queue_id, source.caller_id, source.campaign_id, source.caqh_id,
-                source.can_proceed_with_call, source.form_start_time, source.form_submission_time,
-                source.form_total_time_minutes, source.verification_complete,
-                source.provider_currently_practicing_response, source.provider_speciality_category_response,
-                source.phone_number_correct_response, source.practice_location_name_response,
-                source.practice_location_address_response, source.practice_location_suite_response,
-                source.practice_accepting_new_patients_response, source.practice_accepting_new_medicare_patients_response,
-                source.enriched_provider_speciality_category_value, source.enriched_phone_number_value,
-                source.enriched_practice_location_name_value, source.enriched_practice_street_line_1_value,
-                source.enriched_practice_street_line_2_suite_value, source.enriched_practice_city_value,
-                source.enriched_practice_zip_value, source.enriched_practice_state_value,
-                source.standard_comments, source.unique_comments,
-                CURRENT_DATE(), NULL, NULL
-            )
-            """,
-            [
-                row["record_queue_id"],
-                row["caller_id"],
-                row["campaign_id"],
-                row["caqh_id"],
-                row["can_proceed_with_call"],
-                row["form_start_time"],
-                row["form_submission_time"],
-                row["form_total_time_minutes"],
-                row["verification_complete"],
-                row["provider_currently_practicing_response"],
-                row["provider_speciality_category_response"],
-                row["phone_number_correct_response"],
-                row["practice_location_name_response"],
-                row["practice_location_address_response"],
-                row["practice_location_suite_response"],
-                row["practice_accepting_new_patients_response"],
-                row["practice_accepting_new_medicare_patients_response"],
-                row["enriched_provider_speciality_category_value"],
-                row["enriched_phone_number_value"],
-                row["enriched_practice_location_name_value"],
-                row["enriched_practice_street_line_1_value"],
-                row["enriched_practice_street_line_2_suite_value"],
-                row["enriched_practice_city_value"],
-                row["enriched_practice_zip_value"],
-                row["enriched_practice_state_value"],
-                row["standard_comments"],
-                row["unique_comments"],
-            ]
+            f"SELECT COUNT(*) FROM {CATALOG}.master_responses WHERE campaign_id = %s AND caqh_id = %s",
+            [row["campaign_id"], row["caqh_id"]],
         )
+        exists = cursor.fetchone()[0] > 0
+
+    if exists:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                UPDATE {CATALOG}.master_responses SET
+                    record_queue_id                                   = %s,
+                    caller_id                                         = %s,
+                    can_proceed_with_call                             = %s,
+                    form_start_time                                   = CAST(%s AS TIMESTAMP),
+                    form_submission_time                              = CAST(%s AS TIMESTAMP),
+                    form_total_time_minutes                           = %s,
+                    verification_complete                             = %s,
+                    provider_currently_practicing_response            = %s,
+                    provider_speciality_category_response             = %s,
+                    phone_number_correct_response                     = %s,
+                    practice_location_name_response                   = %s,
+                    practice_location_address_response                = %s,
+                    practice_location_suite_response                  = %s,
+                    practice_accepting_new_patients_response          = %s,
+                    practice_accepting_new_medicare_patients_response = %s,
+                    enriched_provider_speciality_category_value       = %s,
+                    enriched_phone_number_value                       = %s,
+                    enriched_practice_location_name_value             = %s,
+                    enriched_practice_street_line_1_value             = %s,
+                    enriched_practice_street_line_2_suite_value       = %s,
+                    enriched_practice_city_value                      = %s,
+                    enriched_practice_zip_value                       = %s,
+                    enriched_practice_state_value                     = %s,
+                    standard_comments                                 = %s,
+                    unique_comments                                   = %s,
+                    attempt_date_1 = COALESCE(attempt_date_1, CURRENT_DATE()),
+                    attempt_date_2 = CASE
+                        WHEN attempt_date_1 IS NOT NULL AND attempt_date_2 IS NULL THEN CURRENT_DATE()
+                        ELSE attempt_date_2
+                    END,
+                    attempt_date_3 = CASE
+                        WHEN attempt_date_2 IS NOT NULL AND attempt_date_3 IS NULL THEN CURRENT_DATE()
+                        ELSE attempt_date_3
+                    END
+                WHERE campaign_id = %s AND caqh_id = %s
+                """,
+                params + [row["campaign_id"], row["caqh_id"]],
+            )
+    else:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO {CATALOG}.master_responses (
+                    record_queue_id, caller_id, campaign_id, caqh_id,
+                    can_proceed_with_call, form_start_time, form_submission_time,
+                    form_total_time_minutes, verification_complete,
+                    provider_currently_practicing_response, provider_speciality_category_response,
+                    phone_number_correct_response, practice_location_name_response,
+                    practice_location_address_response, practice_location_suite_response,
+                    practice_accepting_new_patients_response, practice_accepting_new_medicare_patients_response,
+                    enriched_provider_speciality_category_value, enriched_phone_number_value,
+                    enriched_practice_location_name_value, enriched_practice_street_line_1_value,
+                    enriched_practice_street_line_2_suite_value, enriched_practice_city_value,
+                    enriched_practice_zip_value, enriched_practice_state_value,
+                    standard_comments, unique_comments,
+                    attempt_date_1, attempt_date_2, attempt_date_3
+                ) VALUES (
+                    %s, %s, %s, %s,
+                    %s, CAST(%s AS TIMESTAMP), CAST(%s AS TIMESTAMP),
+                    %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s,
+                    CURRENT_DATE(), NULL, NULL
+                )
+                """,
+                params[:2] + [row["campaign_id"], row["caqh_id"]] + params[2:],
+            )
 
 
 def clear_form_state():
