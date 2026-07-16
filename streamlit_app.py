@@ -372,6 +372,16 @@ def clear_form_state():
     for key in FORM_KEYS:
         if key in st.session_state:
             del st.session_state[key]
+    st.session_state.pop("_form_snap", None)
+
+
+def snapshot_page_data():
+    """Copy all current widget values into a plain dict so they survive page navigation."""
+    snap = st.session_state.get("_form_snap", {})
+    for key in FORM_KEYS:
+        if key in st.session_state:
+            snap[key] = st.session_state[key]
+    st.session_state["_form_snap"] = snap
 
 
 def logout():
@@ -523,6 +533,7 @@ def survey_page_1():
     st.info("Dial the number above. Click Next when the call connects.")
 
     if nav_buttons(back_page=None):
+        snapshot_page_data()
         st.session_state.form_page = 2
         st.rerun()
 
@@ -591,6 +602,7 @@ def survey_page_2():
         if errors:
             show_errors(errors)
         else:
+            snapshot_page_data()
             if st.session_state.p2_can_continue == "No":
                 st.session_state.form_prev_page = 2
                 st.session_state.form_page = 6
@@ -642,6 +654,7 @@ def survey_page_3():
         if errors:
             show_errors(errors)
         else:
+            snapshot_page_data()
             st.session_state.form_page = 4
             st.rerun()
 
@@ -718,6 +731,7 @@ def survey_page_4():
         if errors:
             show_errors(errors)
         else:
+            snapshot_page_data()
             st.session_state.form_page = 5
             st.rerun()
 
@@ -757,6 +771,7 @@ def survey_page_5():
         if errors:
             show_errors(errors)
         else:
+            snapshot_page_data()
             st.session_state.form_page = 6
             st.rerun()
 
@@ -768,7 +783,7 @@ def survey_page_5():
 def survey_page_6():
     st.title("Completion Status")
 
-    if st.session_state.get("p2_can_continue") == "No":
+    if st.session_state.get("_form_snap", {}).get("p2_can_continue") == "No":
         st.warning(
             "You could not proceed with the verification. "
             "This call will be saved as an attempt."
@@ -817,41 +832,44 @@ def survey_page_6():
         submission_time = now_text()
         total_minutes = round((time.time() - st.session_state.form_start_epoch) / 60)
 
-        addr_no      = st.session_state.get("p4_address_correct")  == "No"
-        suite_no     = st.session_state.get("p4_suite_correct")    == "No"
-        specialty_no = st.session_state.get("p3_specialty_correct") == "No"
-        phone_no     = st.session_state.get("p2_phone_correct")    == "No"
-        name_no      = st.session_state.get("p2_name_correct")     == "No"
-        verified     = to_bool(st.session_state.get("p6_verification_complete"))
+        snapshot_page_data()
+        snap = st.session_state.get("_form_snap", {})
+
+        addr_no      = snap.get("p4_address_correct")  == "No"
+        suite_no     = snap.get("p4_suite_correct")    == "No"
+        specialty_no = snap.get("p3_specialty_correct") == "No"
+        phone_no     = snap.get("p2_phone_correct")    == "No"
+        name_no      = snap.get("p2_name_correct")     == "No"
+        verified     = to_bool(snap.get("p6_verification_complete"))
 
         row = {
             "record_queue_id":                                   rec["record_id"],
             "caller_id":                                         st.session_state.caller_id,
             "campaign_id":                                       rec["campaign_id"],
             "caqh_id":                                           rec["db_caqhid"],
-            "can_proceed_with_call":                             to_bool(st.session_state.get("p2_can_continue")),
+            "can_proceed_with_call":                             to_bool(snap.get("p2_can_continue")),
             "form_start_time":                                   st.session_state.form_start_time,
             "form_submission_time":                              submission_time,
             "form_total_time_minutes":                           total_minutes,
             "verification_complete":                             verified,
-            "provider_currently_practicing_response":            to_bool(st.session_state.get("p3_currently_practicing")),
-            "provider_speciality_category_response":             to_bool(st.session_state.get("p3_specialty_correct")),
-            "phone_number_correct_response":                     to_bool(st.session_state.get("p2_phone_correct")),
-            "practice_location_name_response":                   to_bool(st.session_state.get("p2_name_correct")),
-            "practice_location_address_response":                to_bool(st.session_state.get("p4_address_correct")),
-            "practice_location_suite_response":                  to_bool(st.session_state.get("p4_suite_correct")),
-            "practice_accepting_new_patients_response":          to_bool(st.session_state.get("p5_accepting_new")),
-            "practice_accepting_new_medicare_patients_response": to_bool(st.session_state.get("p5_accepting_medicare")),
-            "enriched_provider_speciality_category_value":       st.session_state.get("p3_specialty_enrichment", "").strip() if specialty_no else "",
-            "enriched_phone_number_value":                       st.session_state.get("p2_phone_enrichment", "").strip() if phone_no else "",
-            "enriched_practice_location_name_value":             st.session_state.get("p2_name_enrichment", "").strip() if name_no else "",
-            "enriched_practice_street_line_1_value":             st.session_state.get("p4_addr_line1", "").strip() if addr_no else "",
-            "enriched_practice_street_line_2_suite_value":       st.session_state.get("p4_suite_enrichment", "").strip() if suite_no else "",
-            "enriched_practice_city_value":                      st.session_state.get("p4_city", "").strip() if addr_no else "",
-            "enriched_practice_zip_value":                       st.session_state.get("p4_zip", "").strip() if addr_no else "",
-            "enriched_practice_state_value":                     st.session_state.get("p4_state", "") if addr_no else "",
-            "standard_comments":                                 st.session_state.get("p6_standard_comments", "") or "",
-            "unique_comments":                                   st.session_state.get("p6_unique_comments", "").strip(),
+            "provider_currently_practicing_response":            to_bool(snap.get("p3_currently_practicing")),
+            "provider_speciality_category_response":             to_bool(snap.get("p3_specialty_correct")),
+            "phone_number_correct_response":                     to_bool(snap.get("p2_phone_correct")),
+            "practice_location_name_response":                   to_bool(snap.get("p2_name_correct")),
+            "practice_location_address_response":                to_bool(snap.get("p4_address_correct")),
+            "practice_location_suite_response":                  to_bool(snap.get("p4_suite_correct")),
+            "practice_accepting_new_patients_response":          to_bool(snap.get("p5_accepting_new")),
+            "practice_accepting_new_medicare_patients_response": to_bool(snap.get("p5_accepting_medicare")),
+            "enriched_provider_speciality_category_value":       (snap.get("p3_specialty_enrichment") or "").strip() if specialty_no else "",
+            "enriched_phone_number_value":                       (snap.get("p2_phone_enrichment") or "").strip() if phone_no else "",
+            "enriched_practice_location_name_value":             (snap.get("p2_name_enrichment") or "").strip() if name_no else "",
+            "enriched_practice_street_line_1_value":             (snap.get("p4_addr_line1") or "").strip() if addr_no else "",
+            "enriched_practice_street_line_2_suite_value":       (snap.get("p4_suite_enrichment") or "").strip() if suite_no else "",
+            "enriched_practice_city_value":                      (snap.get("p4_city") or "").strip() if addr_no else "",
+            "enriched_practice_zip_value":                       (snap.get("p4_zip") or "").strip() if addr_no else "",
+            "enriched_practice_state_value":                     snap.get("p4_state") or "" if addr_no else "",
+            "standard_comments":                                 snap.get("p6_standard_comments") or "",
+            "unique_comments":                                   (snap.get("p6_unique_comments") or "").strip(),
         }
 
         upsert_response(row)
