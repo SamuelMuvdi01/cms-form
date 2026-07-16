@@ -17,12 +17,19 @@ load_dotenv()
 CATALOG = "cat_dev_dq.master_responses"
 
 
+def _get_secret(key):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ[key]
+
+
 @st.cache_resource
 def get_db_connection():
     return sql.connect(
-        server_hostname=os.environ["DATABRICKS_SERVER_HOSTNAME"],
-        http_path=os.environ["DATABRICKS_HTTP_PATH"],
-        access_token=os.environ["DATABRICKS_TOKEN"],
+        server_hostname=_get_secret("DATABRICKS_SERVER_HOSTNAME"),
+        http_path=_get_secret("DATABRICKS_HTTP_PATH"),
+        access_token=_get_secret("DATABRICKS_TOKEN"),
     )
 
 
