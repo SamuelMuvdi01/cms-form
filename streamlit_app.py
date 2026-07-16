@@ -30,6 +30,7 @@ def get_db_connection():
         server_hostname=_get_secret("DATABRICKS_SERVER_HOSTNAME"),
         http_path=_get_secret("DATABRICKS_HTTP_PATH"),
         access_token=_get_secret("DATABRICKS_TOKEN"),
+        use_inline_params=True,
     )
 
 
@@ -447,7 +448,11 @@ def login_page():
         submitted = st.form_submit_button("Login", type="primary")
 
     if submitted:
-        user = check_login(username, password)
+        try:
+            user = check_login(username, password)
+        except Exception:
+            st.error("Could not connect to the database. Please wait a moment and try again. If this continues, contact your supervisor.")
+            st.stop()
         if user is None:
             st.error("Username or password is not correct. Please try again.")
         else:
@@ -479,7 +484,11 @@ def home_page():
 
     st.divider()
 
-    record, count = load_next_record()
+    try:
+        record, count = load_next_record()
+    except Exception:
+        st.error("Could not load records from the database. Please wait a moment and refresh the page. If this continues, contact your supervisor.")
+        st.stop()
 
     if record is None:
         st.info(
