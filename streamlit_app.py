@@ -64,71 +64,8 @@ STANDARD_COMMENTS = [
     "Wrong number",
 ]
 
-MASTER_COLUMNS = [
-    "caller_id",
-    "campaign_id",
-    "can_proceed_with_call",
-    "form_start_time",
-    "form_submission_time",
-    "form_total_time_minutes",
-    "attempt_date_1",
-    "attempt_date_2",
-    "attempt_date_3",
-    "verification_complete",
-    "caqh_id",
-    "provider_currently_practicing_response",
-    "provider_speciality_category_response",
-    "phone_number_correct_response",
-    "practice_location_name_response",
-    "practice_location_address_response",
-    "practice_location_suite_response",
-    "practice_accepting_new_patients_response",
-    "practice_accepting_new_medicare_patients_response",
-    "enriched_provider_speciality_category_value",
-    "enriched_phone_number_value",
-    "enriched_practice_location_name_value",
-    "enriched_practice_street_line_1_value",
-    "enriched_practice_street_line_2_suite_value",
-    "enriched_practice_city_value",
-    "enriched_practice_zip_value",
-    "enriched_practice_state_value",
-    "standard_comments",
-    "unique_comments",
-]
-
-CALLER_REPORT_COLUMNS = [
-    "caller_id",
-    "campaign_id",
-    "form_submission_time",
-    "caqh_id",
-    "can_proceed_with_call",
-    "attempt_date_1",
-    "attempt_date_2",
-    "attempt_date_3",
-    "verification_complete",
-    "provider_currently_practicing_response",
-    "provider_speciality_category_response",
-    "phone_number_correct_response",
-    "practice_location_name_response",
-    "practice_location_address_response",
-    "practice_location_suite_response",
-    "practice_accepting_new_patients_response",
-    "practice_accepting_new_medicare_patients_response",
-    "enriched_provider_speciality_category_value",
-    "enriched_phone_number_value",
-    "enriched_practice_location_name_value",
-    "enriched_practice_street_line_1_value",
-    "enriched_practice_street_line_2_suite_value",
-    "enriched_practice_city_value",
-    "enriched_practice_zip_value",
-    "enriched_practice_state_value",
-    "standard_comments",
-    "unique_comments",
-]
-
-# All widget keys used across the 6 pages — cleared on start/cancel.
+# Widget keys cleared on form start/cancel. p1 keys removed — page 1 is now read-only.
 FORM_KEYS = [
-    "p1_campaign_id", "p1_caqh_id",
     "p2_phone_correct", "p2_phone_enrichment",
     "p2_can_continue",
     "p2_name_correct", "p2_name_enrichment",
@@ -161,15 +98,16 @@ st.set_page_config(
 def init_session_state():
     defaults = {
         "logged_in": False,
+        "username": None,
         "caller_id": None,
         "role": None,
         "page": "home",
         "form_started": False,
         "form_start_time": None,
         "form_start_epoch": None,
-        "caller_report_csv": None,
         "form_page": 1,
         "form_prev_page": 5,
+        "current_record": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -188,78 +126,126 @@ def now_text():
 
 
 def to_bool(val):
-    """Yes → True, No → False, anything else → None."""
     return {"Yes": True, "No": False}.get(val)
 
 
-def check_login(caller_id, password):
+def check_login(username, password):
     conn = get_db_connection()
     with conn.cursor() as cursor:
         cursor.execute(
-            f"SELECT caller_id, role FROM {CATALOG}.users WHERE caller_id = %s AND password = %s",
-            [caller_id.strip(), password]
+            f"SELECT username, caller_id, role FROM {CATALOG}.users WHERE username = %s AND password = %s",
+            [username.strip(), password]
         )
         row = cursor.fetchone()
     if row is None:
         return None
-    return {"caller_id": row[0], "role": row[1]}
+    return {"username": row[0], "caller_id": row[1], "role": row[2]}
 
 
-def clear_form_state():
-    for key in FORM_KEYS:
-        if key in st.session_state:
-            del st.session_state[key]
+def load_next_record():
+    """
+    Returns (record_dict, remaining_count) for this caller.
+    Admin (caller_id=0) sees all unverified records across all callers.
+    Attempt priority: attempt_date_1 IS NULL first, then 2, then 3.
+    Records with all 3 attempt dates filled are excluded from the queue.
+    Returns (None, 0) when the queue is empty.
+    """
+    conn = get_db_connection()
+    caller_id = st.session_state.caller_id
+
+    is_admin = (caller_id == 0)
+    base_filter = """
+        verification_complete = FALSE
+        AND (attempt_date_1 IS NULL OR attempt_date_2 IS NULL OR attempt_date_3 IS NULL)
+    """
+
+    if is_admin:
+        where = f"WHERE {base_filter}"
+        params = []
+    else:
+        where = f"WHERE caller_id = %s AND {base_filter}"
+        params = [caller_id]
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {CATALOG}.record_queue {where}",
+            params
+        )
+        count = cursor.fetchone()[0]
+
+        if count == 0:
+            return None, 0
+
+        cursor.execute(
+            f"""
+            SELECT
+                record_id, caller_id, campaign_id,
+                db_caqhid, db_first_name, db_last_name,
+                db_office_phone_number, db_practice_location_name,
+                db_specialty_list, db_street, db_street_2,
+                db_city, db_state, db_zip_code,
+                verification_complete, attempt_date_1, attempt_date_2, attempt_date_3
+            FROM {CATALOG}.record_queue
+            {where}
+            ORDER BY
+                CASE
+                    WHEN attempt_date_1 IS NULL THEN 0
+                    WHEN attempt_date_2 IS NULL THEN 1
+                    WHEN attempt_date_3 IS NULL THEN 2
+                END ASC
+            LIMIT 1
+            """,
+            params
+        )
+        row = cursor.fetchone()
+
+    if row is None:
+        return None, 0
+
+    cols = [
+        "record_id", "caller_id", "campaign_id",
+        "db_caqhid", "db_first_name", "db_last_name",
+        "db_office_phone_number", "db_practice_location_name",
+        "db_specialty_list", "db_street", "db_street_2",
+        "db_city", "db_state", "db_zip_code",
+        "verification_complete", "attempt_date_1", "attempt_date_2", "attempt_date_3"
+    ]
+    return dict(zip(cols, row)), count
 
 
-def logout():
-    st.session_state.logged_in = False
-    st.session_state.caller_id = None
-    st.session_state.role = None
-    st.session_state.page = "home"
-    st.session_state.form_started = False
-    st.session_state.form_start_time = None
-    st.session_state.form_start_epoch = None
-    st.session_state.caller_report_csv = None
-    st.session_state.form_page = 1
-    clear_form_state()
-    st.rerun()
+def attempt_number(record):
+    if record["attempt_date_1"] is None:
+        return 1
+    if record["attempt_date_2"] is None:
+        return 2
+    return 3
 
 
-def start_form():
-    st.session_state.form_started = True
-    st.session_state.form_start_time = now_text()
-    st.session_state.form_start_epoch = time.time()
-    st.session_state.caller_report_csv = None
-    st.session_state.form_page = 1
-    st.session_state.form_prev_page = 5
-    clear_form_state()
-    st.rerun()
-
-
-def cancel_form():
-    st.session_state.form_started = False
-    st.session_state.form_start_time = None
-    st.session_state.form_start_epoch = None
-    st.session_state.form_page = 1
-    clear_form_state()
-    st.rerun()
-
-
-def is_already_verified(campaign_id, caqh_id):
+def update_queue_record(record_id, verification_complete):
+    """Stamps the next available attempt date and updates verification_complete."""
     conn = get_db_connection()
     with conn.cursor() as cursor:
         cursor.execute(
             f"""
-            SELECT verification_complete
-            FROM {CATALOG}.master_responses
-            WHERE campaign_id = %s AND caqh_id = %s
+            UPDATE {CATALOG}.record_queue
+            SET
+                attempt_date_1 = CASE
+                    WHEN attempt_date_1 IS NULL THEN CURRENT_DATE()
+                    ELSE attempt_date_1
+                END,
+                attempt_date_2 = CASE
+                    WHEN attempt_date_1 IS NOT NULL AND attempt_date_2 IS NULL THEN CURRENT_DATE()
+                    ELSE attempt_date_2
+                END,
+                attempt_date_3 = CASE
+                    WHEN attempt_date_2 IS NOT NULL AND attempt_date_3 IS NULL THEN CURRENT_DATE()
+                    ELSE attempt_date_3
+                END,
+                verification_complete = %s
+            WHERE record_id = %s
             """,
-            [campaign_id, caqh_id]
+            [verification_complete, record_id]
         )
-        row = cursor.fetchone()
-    if row is None:
-        return False
-    return row[0] is True
 
 
 def upsert_response(row):
@@ -270,6 +256,7 @@ def upsert_response(row):
             MERGE INTO {CATALOG}.master_responses AS target
             USING (
                 SELECT
+                    %s                    AS record_queue_id,
                     %s                    AS caller_id,
                     %s                    AS campaign_id,
                     %s                    AS caqh_id,
@@ -301,6 +288,7 @@ def upsert_response(row):
             AND target.caqh_id    = source.caqh_id
 
             WHEN MATCHED THEN UPDATE SET
+                target.record_queue_id                                   = source.record_queue_id,
                 target.caller_id                                         = source.caller_id,
                 target.can_proceed_with_call                             = source.can_proceed_with_call,
                 target.form_start_time                                   = source.form_start_time,
@@ -340,7 +328,7 @@ def upsert_response(row):
                                         END
 
             WHEN NOT MATCHED THEN INSERT (
-                caller_id, campaign_id, caqh_id,
+                record_queue_id, caller_id, campaign_id, caqh_id,
                 can_proceed_with_call, form_start_time, form_submission_time,
                 form_total_time_minutes, verification_complete,
                 provider_currently_practicing_response, provider_speciality_category_response,
@@ -354,7 +342,7 @@ def upsert_response(row):
                 standard_comments, unique_comments,
                 attempt_date_1, attempt_date_2, attempt_date_3
             ) VALUES (
-                source.caller_id, source.campaign_id, source.caqh_id,
+                source.record_queue_id, source.caller_id, source.campaign_id, source.caqh_id,
                 source.can_proceed_with_call, source.form_start_time, source.form_submission_time,
                 source.form_total_time_minutes, source.verification_complete,
                 source.provider_currently_practicing_response, source.provider_speciality_category_response,
@@ -370,6 +358,7 @@ def upsert_response(row):
             )
             """,
             [
+                row["record_queue_id"],
                 row["caller_id"],
                 row["campaign_id"],
                 row["caqh_id"],
@@ -399,28 +388,38 @@ def upsert_response(row):
             ]
         )
 
-        # Read back the stamped attempt dates so the caller report is complete.
-        cursor.execute(
-            f"""
-            SELECT attempt_date_1, attempt_date_2, attempt_date_3
-            FROM {CATALOG}.master_responses
-            WHERE campaign_id = %s AND caqh_id = %s
-            """,
-            [row["campaign_id"], row["caqh_id"]]
-        )
-        dates = cursor.fetchone()
 
-    if dates:
-        row["attempt_date_1"] = str(dates[0]) if dates[0] else ""
-        row["attempt_date_2"] = str(dates[1]) if dates[1] else ""
-        row["attempt_date_3"] = str(dates[2]) if dates[2] else ""
-
-    return row
+def clear_form_state():
+    for key in FORM_KEYS:
+        if key in st.session_state:
+            del st.session_state[key]
 
 
-def make_caller_report(row):
-    report_row = {col: row.get(col, "") for col in CALLER_REPORT_COLUMNS}
-    return pd.DataFrame([report_row]).to_csv(index=False)
+def logout():
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+
+def start_form(record):
+    st.session_state.form_started = True
+    st.session_state.form_start_time = now_text()
+    st.session_state.form_start_epoch = time.time()
+    st.session_state.form_page = 1
+    st.session_state.form_prev_page = 5
+    st.session_state.current_record = record
+    clear_form_state()
+    st.rerun()
+
+
+def cancel_form():
+    st.session_state.form_started = False
+    st.session_state.form_start_time = None
+    st.session_state.form_start_epoch = None
+    st.session_state.form_page = 1
+    st.session_state.current_record = None
+    clear_form_state()
+    st.rerun()
 
 
 def show_errors(errors):
@@ -436,16 +435,17 @@ def login_page():
     st.title("Provider Survey Login")
 
     with st.form("login_form"):
-        caller_id = st.text_input("Caller ID")
+        username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Login", type="primary")
 
     if submitted:
-        user = check_login(caller_id, password)
+        user = check_login(username, password)
         if user is None:
-            st.error("Invalid caller ID or password.")
+            st.error("Username or password is not correct. Please try again.")
         else:
             st.session_state.logged_in = True
+            st.session_state.username = user["username"]
             st.session_state.caller_id = user["caller_id"]
             st.session_state.role = user["role"]
             st.session_state.page = "home"
@@ -458,32 +458,48 @@ def login_page():
 
 def home_page():
     st.title("Caller Dashboard")
-    st.write(f"Signed in as: **{st.session_state.caller_id}**")
+    st.write(f"Signed in as: **{st.session_state.username}**")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Start Form", type="primary", use_container_width=True):
-            start_form()
-    with col2:
+    col_logout, col_admin = st.columns([1, 1])
+    with col_logout:
         if st.button("Logout", use_container_width=True):
             logout()
-    with col3:
+    with col_admin:
         if st.session_state.role == "admin":
             if st.button("Admin Page", use_container_width=True):
                 st.session_state.page = "admin"
                 st.rerun()
 
-    if st.session_state.caller_report_csv:
-        st.divider()
-        st.success("Form submitted successfully.")
-        st.write("Would you like to save a copy of these results to your PC?")
-        st.download_button(
-            label="Yes, save results to my PC",
-            data=st.session_state.caller_report_csv,
-            file_name="caller_provider_survey_report.csv",
-            mime="text/csv",
-            type="primary"
+    st.divider()
+
+    record, count = load_next_record()
+
+    if record is None:
+        st.info(
+            "There are no records available to call right now. "
+            "All records in your queue have been completed or are waiting for more assignments. "
+            "Please contact your supervisor."
         )
+        return
+
+    attempt = attempt_number(record)
+    provider_name = f"{record['db_first_name'] or ''} {record['db_last_name'] or ''}".strip() or "—"
+
+    st.subheader("Next Record to Call")
+
+    col_info, col_action = st.columns([3, 1])
+
+    with col_info:
+        st.markdown(f"**Provider:** {provider_name}")
+        st.markdown(f"**Phone:** {record['db_office_phone_number'] or '—'}")
+        st.markdown(f"**Campaign ID:** {record['campaign_id'] or '—'}")
+        st.markdown(f"**CAQH ID:** {record['db_caqhid'] or '—'}")
+        st.markdown(f"**Attempt:** {attempt} of 3")
+        st.caption(f"{count} record(s) remaining in your queue")
+
+    with col_action:
+        if st.button("Start This Record", type="primary", use_container_width=True):
+            start_form(record)
 
 
 # ======================================================
@@ -491,7 +507,6 @@ def home_page():
 # ======================================================
 
 def nav_buttons(back_page=None):
-    """Renders Back / Next →. Returns True when Next is clicked."""
     col_back, col_next = st.columns([1, 5])
     with col_back:
         if back_page is not None:
@@ -503,32 +518,26 @@ def nav_buttons(back_page=None):
 
 
 # ======================================================
-# SURVEY — PAGE 1: Call Metadata
+# SURVEY — PAGE 1: Record Confirmation
 # ======================================================
 
 def survey_page_1():
-    st.info(f"Caller ID: **{st.session_state.caller_id}**")
-    st.text_input("Campaign ID *", key="p1_campaign_id")
-    st.text_input("CAQHID (Copy & Paste here) *", key="p1_caqh_id")
+    rec = st.session_state.current_record
+    provider_name = f"{rec['db_first_name'] or ''} {rec['db_last_name'] or ''}".strip() or "—"
+    attempt = attempt_number(rec)
+
+    st.subheader("Record to Verify")
+    st.markdown(f"**Provider:** {provider_name}")
+    st.markdown(f"**CAQH ID:** {rec['db_caqhid'] or '—'}")
+    st.markdown(f"**Campaign ID:** {rec['campaign_id'] or '—'}")
+    st.markdown(f"**Phone Number:** {rec['db_office_phone_number'] or '—'}")
+    st.markdown(f"**Attempt:** {attempt} of 3")
+
+    st.info("Dial the number above. Click Next when the call connects.")
 
     if nav_buttons(back_page=None):
-        errors = []
-        if not st.session_state.get("p1_campaign_id", "").strip():
-            errors.append("Campaign ID is required.")
-        if not st.session_state.get("p1_caqh_id", "").strip():
-            errors.append("CAQHID is required.")
-
-        if not errors and is_already_verified(
-            st.session_state.get("p1_campaign_id", "").strip(),
-            st.session_state.get("p1_caqh_id", "").strip()
-        ):
-            errors.append("This record is already verified — no further action needed.")
-
-        if errors:
-            show_errors(errors)
-        else:
-            st.session_state.form_page = 2
-            st.rerun()
+        st.session_state.form_page = 2
+        st.rerun()
 
 
 # ======================================================
@@ -536,9 +545,10 @@ def survey_page_1():
 # ======================================================
 
 def survey_page_2():
+    rec = st.session_state.current_record
     st.title("Practice Location Name and Number Validation")
 
-    # Q3 — Phone number
+    st.caption(f"On file — Phone number: {rec['db_office_phone_number'] or '—'}")
     st.radio(
         "Is the phone number correct? *",
         YES_NO,
@@ -551,7 +561,6 @@ def survey_page_2():
 
     st.divider()
 
-    # Q4 — Proceed gate
     st.radio(
         "Can you proceed with verification? *",
         YES_NO,
@@ -560,9 +569,9 @@ def survey_page_2():
         horizontal=True
     )
 
-    # Q5 — Practice name (only shown when caller can proceed)
     if st.session_state.get("p2_can_continue") == "Yes":
         st.divider()
+        st.caption(f"On file — Practice name: {rec['db_practice_location_name'] or '—'}")
         st.radio(
             "Is the practice name correct? *",
             YES_NO,
@@ -609,9 +618,9 @@ def survey_page_2():
 # ======================================================
 
 def survey_page_3():
+    rec = st.session_state.current_record
     st.title("Provider Identity & Practicing Status")
 
-    # Q6 — Currently practicing (Yes/No only, no enrichment)
     st.radio(
         "Is this provider currently practicing at this location? *",
         YES_NO,
@@ -622,7 +631,7 @@ def survey_page_3():
 
     st.divider()
 
-    # Q7 — Specialty
+    st.caption(f"On file — Specialty: {rec['db_specialty_list'] or '—'}")
     st.radio(
         "Is the specialty correct? *",
         YES_NO,
@@ -655,9 +664,20 @@ def survey_page_3():
 # ======================================================
 
 def survey_page_4():
+    rec = st.session_state.current_record
+
+    addr_parts = [
+        rec.get("db_street"),
+        rec.get("db_street_2"),
+        rec.get("db_city"),
+        rec.get("db_state"),
+        rec.get("db_zip_code"),
+    ]
+    addr_on_file = " · ".join(p for p in addr_parts if p) or "—"
+
     st.title("Practice Location Validation")
 
-    # Q8 — Address
+    st.caption(f"On file — Address: {addr_on_file}")
     st.radio(
         "Is the address correct? *",
         YES_NO,
@@ -678,7 +698,7 @@ def survey_page_4():
 
     st.divider()
 
-    # Q9 — Suite
+    st.caption(f"On file — Suite: {rec.get('db_street_2') or '—'}")
     st.radio(
         "Is the suite number correct? *",
         YES_NO,
@@ -722,7 +742,6 @@ def survey_page_4():
 def survey_page_5():
     st.title("New Patients Admission Status Validation")
 
-    # Q10 — Accepting new patients
     st.radio(
         "Is the practice accepting new patients? *",
         YES_NO,
@@ -733,7 +752,6 @@ def survey_page_5():
 
     st.divider()
 
-    # Q11 — Accepting Medicare patients
     st.radio(
         "Is the practice accepting new Medicare patients? *",
         YES_NO,
@@ -765,11 +783,10 @@ def survey_page_6():
 
     if st.session_state.get("p2_can_continue") == "No":
         st.warning(
-            "The caller could not proceed with verification. "
-            "This submission will be logged as an attempt."
+            "You could not proceed with the verification. "
+            "This call will be saved as an attempt."
         )
 
-    # Q12 — Verification complete
     st.radio(
         "Verification complete? *",
         YES_NO,
@@ -780,7 +797,6 @@ def survey_page_6():
 
     st.divider()
 
-    # Q13 — Standard comments
     st.subheader("Standard Comments")
     st.radio(
         "Select a standard comment",
@@ -791,7 +807,6 @@ def survey_page_6():
 
     st.divider()
 
-    # Q14 — Unique / nonstandard comments
     st.subheader("Unique or Nonstandard Comments")
     st.text_area(
         "Enter any unique or nonstandard comments",
@@ -811,27 +826,27 @@ def survey_page_6():
             st.error("Verification complete is required.")
             st.stop()
 
+        rec = st.session_state.current_record
         submission_time = now_text()
         total_minutes = round((time.time() - st.session_state.form_start_epoch) / 60)
 
-        addr_no      = st.session_state.get("p4_address_correct") == "No"
-        suite_no     = st.session_state.get("p4_suite_correct")   == "No"
+        addr_no      = st.session_state.get("p4_address_correct")  == "No"
+        suite_no     = st.session_state.get("p4_suite_correct")    == "No"
         specialty_no = st.session_state.get("p3_specialty_correct") == "No"
-        phone_no     = st.session_state.get("p2_phone_correct")   == "No"
-        name_no      = st.session_state.get("p2_name_correct")    == "No"
+        phone_no     = st.session_state.get("p2_phone_correct")    == "No"
+        name_no      = st.session_state.get("p2_name_correct")     == "No"
+        verified     = to_bool(st.session_state.get("p6_verification_complete"))
 
         row = {
+            "record_queue_id":                                   rec["record_id"],
             "caller_id":                                         st.session_state.caller_id,
-            "campaign_id":                                       st.session_state.get("p1_campaign_id", "").strip(),
+            "campaign_id":                                       rec["campaign_id"],
+            "caqh_id":                                           rec["db_caqhid"],
             "can_proceed_with_call":                             to_bool(st.session_state.get("p2_can_continue")),
             "form_start_time":                                   st.session_state.form_start_time,
             "form_submission_time":                              submission_time,
             "form_total_time_minutes":                           total_minutes,
-            "attempt_date_1":                                    "",
-            "attempt_date_2":                                    "",
-            "attempt_date_3":                                    "",
-            "verification_complete":                             to_bool(st.session_state.get("p6_verification_complete")),
-            "caqh_id":                                           st.session_state.get("p1_caqh_id", "").strip(),
+            "verification_complete":                             verified,
             "provider_currently_practicing_response":            to_bool(st.session_state.get("p3_currently_practicing")),
             "provider_speciality_category_response":             to_bool(st.session_state.get("p3_specialty_correct")),
             "phone_number_correct_response":                     to_bool(st.session_state.get("p2_phone_correct")),
@@ -852,12 +867,14 @@ def survey_page_6():
             "unique_comments":                                   st.session_state.get("p6_unique_comments", "").strip(),
         }
 
-        row = upsert_response(row)
-        st.session_state.caller_report_csv = make_caller_report(row)
+        upsert_response(row)
+        update_queue_record(rec["record_id"], verified)
+
         st.session_state.form_started = False
         st.session_state.form_start_time = None
         st.session_state.form_start_epoch = None
         st.session_state.form_page = 1
+        st.session_state.current_record = None
         clear_form_state()
         st.rerun()
 
@@ -892,33 +909,52 @@ def survey_page():
 # ======================================================
 
 def admin_page():
-    st.title("Admin Page")
+    st.title("Admin Dashboard")
 
     if st.session_state.role != "admin":
-        st.error("You do not have access to this page.")
+        st.error("You do not have permission to view this page.")
         return
 
-    if st.button("Back to Dashboard"):
+    if st.button("← Back to Dashboard"):
         st.session_state.page = "home"
         st.rerun()
 
     st.divider()
 
     conn = get_db_connection()
+
+    st.subheader("Record Queue")
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT * FROM {CATALOG}.record_queue ORDER BY record_id ASC"
+        )
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+    df_queue = pd.DataFrame(rows, columns=columns)
+    st.write(f"Total records in queue: **{len(df_queue)}**")
+    st.dataframe(df_queue, use_container_width=True, hide_index=True)
+    st.download_button(
+        label="Download queue CSV",
+        data=df_queue.to_csv(index=False),
+        file_name="record_queue.csv",
+        mime="text/csv"
+    )
+
+    st.divider()
+
+    st.subheader("Master Responses")
     with conn.cursor() as cursor:
         cursor.execute(
             f"SELECT * FROM {CATALOG}.master_responses ORDER BY form_submission_time DESC"
         )
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description]
-
-    df = pd.DataFrame(rows, columns=columns)
-    st.write(f"Total records: **{len(df)}**")
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
+    df_responses = pd.DataFrame(rows, columns=columns)
+    st.write(f"Total responses submitted: **{len(df_responses)}**")
+    st.dataframe(df_responses, use_container_width=True, hide_index=True)
     st.download_button(
-        label="Download master CSV",
-        data=df.to_csv(index=False),
+        label="Download responses CSV",
+        data=df_responses.to_csv(index=False),
         file_name="master_responses.csv",
         mime="text/csv"
     )
