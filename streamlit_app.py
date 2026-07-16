@@ -161,7 +161,7 @@ def load_next_record():
     conn = get_db_connection()
     caller_id = st.session_state.caller_id
 
-    is_admin = (caller_id == 0)
+    is_admin = (st.session_state.role == "admin")
     base_filter = """
         verification_complete = FALSE
         AND (attempt_date_1 IS NULL OR attempt_date_2 IS NULL OR attempt_date_3 IS NULL)
