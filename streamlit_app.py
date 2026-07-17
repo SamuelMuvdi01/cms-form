@@ -1,3 +1,4 @@
+import math
 import os
 import time
 from datetime import datetime
@@ -16,6 +17,16 @@ load_dotenv()
 
 CATALOG = "cat_dev_dq.master_responses"
 
+# Keys cleared when can_proceed_with_call == "No" so pages 3-5 fields are NULL in DB.
+_P3_P4_P5_KEYS = [
+    "p3_currently_practicing",
+    "p3_specialty_correct", "p3_specialty_enrichment",
+    "p4_address_correct",
+    "p4_addr_line1", "p4_city", "p4_state", "p4_zip",
+    "p4_suite_correct", "p4_suite_enrichment",
+    "p5_accepting_new", "p5_accepting_medicare",
+]
+
 
 def _get_secret(key):
     try:
@@ -24,7 +35,9 @@ def _get_secret(key):
         return os.environ[key]
 
 
-@st.cache_resource
+# ttl=3600 ensures a fresh connection is established every hour, preventing
+# stale/dropped connections from being served indefinitely.
+@st.cache_resource(ttl=3600)
 def get_db_connection():
     return sql.connect(
         server_hostname=_get_secret("DATABRICKS_SERVER_HOSTNAME"),
@@ -150,7 +163,9 @@ def check_login(username, password):
     return {"username": row[0], "caller_id": row[1], "role": row[2]}
 
 
-def load_next_record():
+# Cache keyed on caller_id + role; ttl=30 collapses rapid reruns to zero extra DB calls.
+@st.cache_data(ttl=30)
+def load_next_record(caller_id, role):
     """
     Returns (record_dict, remaining_count) for this caller.
     Admin (caller_id=0) sees all unverified records across all callers.
@@ -159,9 +174,8 @@ def load_next_record():
     Returns (None, 0) when the queue is empty.
     """
     conn = get_db_connection()
-    caller_id = st.session_state.caller_id
 
-    is_admin = (st.session_state.role == "admin")
+    is_admin = (role == "admin")
     base_filter = """
         verification_complete = FALSE
         AND (attempt_date_1 IS NULL OR attempt_date_2 IS NULL OR attempt_date_3 IS NULL)
@@ -257,10 +271,13 @@ def update_queue_record(record_id, verification_complete):
 
 
 def upsert_response(row):
+    """Single atomic MERGE INTO — no SELECT pre-read, no TOCTOU race."""
     conn = get_db_connection()
     params = [
         row["record_queue_id"],
         row["caller_id"],
+        row["campaign_id"],
+        row["caqh_id"],
         row["can_proceed_with_call"],
         row["form_start_time"],
         row["form_submission_time"],
@@ -288,84 +305,107 @@ def upsert_response(row):
 
     with conn.cursor() as cursor:
         cursor.execute(
-            f"SELECT COUNT(*) FROM {CATALOG}.master_responses WHERE campaign_id = %s AND caqh_id = %s",
-            [row["campaign_id"], row["caqh_id"]],
+            f"""
+            MERGE INTO {CATALOG}.master_responses AS target
+            USING (
+                SELECT
+                    %s AS record_queue_id,
+                    %s AS caller_id,
+                    %s AS campaign_id,
+                    %s AS caqh_id,
+                    %s AS can_proceed_with_call,
+                    CAST(%s AS TIMESTAMP) AS form_start_time,
+                    CAST(%s AS TIMESTAMP) AS form_submission_time,
+                    %s AS form_total_time_minutes,
+                    %s AS verification_complete,
+                    %s AS provider_currently_practicing_response,
+                    %s AS provider_speciality_category_response,
+                    %s AS phone_number_correct_response,
+                    %s AS practice_location_name_response,
+                    %s AS practice_location_address_response,
+                    %s AS practice_location_suite_response,
+                    %s AS practice_accepting_new_patients_response,
+                    %s AS practice_accepting_new_medicare_patients_response,
+                    %s AS enriched_provider_speciality_category_value,
+                    %s AS enriched_phone_number_value,
+                    %s AS enriched_practice_location_name_value,
+                    %s AS enriched_practice_street_line_1_value,
+                    %s AS enriched_practice_street_line_2_suite_value,
+                    %s AS enriched_practice_city_value,
+                    %s AS enriched_practice_zip_value,
+                    %s AS enriched_practice_state_value,
+                    %s AS standard_comments,
+                    %s AS unique_comments
+            ) AS source
+            ON target.campaign_id = source.campaign_id
+               AND target.caqh_id = source.caqh_id
+            WHEN MATCHED THEN UPDATE SET
+                record_queue_id                                   = source.record_queue_id,
+                caller_id                                         = source.caller_id,
+                can_proceed_with_call                             = source.can_proceed_with_call,
+                form_start_time                                   = source.form_start_time,
+                form_submission_time                              = source.form_submission_time,
+                form_total_time_minutes                           = source.form_total_time_minutes,
+                verification_complete                             = source.verification_complete,
+                provider_currently_practicing_response            = source.provider_currently_practicing_response,
+                provider_speciality_category_response             = source.provider_speciality_category_response,
+                phone_number_correct_response                     = source.phone_number_correct_response,
+                practice_location_name_response                   = source.practice_location_name_response,
+                practice_location_address_response                = source.practice_location_address_response,
+                practice_location_suite_response                  = source.practice_location_suite_response,
+                practice_accepting_new_patients_response          = source.practice_accepting_new_patients_response,
+                practice_accepting_new_medicare_patients_response = source.practice_accepting_new_medicare_patients_response,
+                enriched_provider_speciality_category_value       = source.enriched_provider_speciality_category_value,
+                enriched_phone_number_value                       = source.enriched_phone_number_value,
+                enriched_practice_location_name_value             = source.enriched_practice_location_name_value,
+                enriched_practice_street_line_1_value             = source.enriched_practice_street_line_1_value,
+                enriched_practice_street_line_2_suite_value       = source.enriched_practice_street_line_2_suite_value,
+                enriched_practice_city_value                      = source.enriched_practice_city_value,
+                enriched_practice_zip_value                       = source.enriched_practice_zip_value,
+                enriched_practice_state_value                     = source.enriched_practice_state_value,
+                standard_comments                                 = source.standard_comments,
+                unique_comments                                   = source.unique_comments,
+                attempt_date_1 = COALESCE(target.attempt_date_1, CURRENT_DATE()),
+                attempt_date_2 = CASE
+                    WHEN target.attempt_date_1 IS NOT NULL AND target.attempt_date_2 IS NULL THEN CURRENT_DATE()
+                    ELSE target.attempt_date_2
+                END,
+                attempt_date_3 = CASE
+                    WHEN target.attempt_date_2 IS NOT NULL AND target.attempt_date_3 IS NULL THEN CURRENT_DATE()
+                    ELSE target.attempt_date_3
+                END
+            WHEN NOT MATCHED THEN INSERT (
+                record_queue_id, caller_id, campaign_id, caqh_id,
+                can_proceed_with_call, form_start_time, form_submission_time,
+                form_total_time_minutes, verification_complete,
+                provider_currently_practicing_response, provider_speciality_category_response,
+                phone_number_correct_response, practice_location_name_response,
+                practice_location_address_response, practice_location_suite_response,
+                practice_accepting_new_patients_response, practice_accepting_new_medicare_patients_response,
+                enriched_provider_speciality_category_value, enriched_phone_number_value,
+                enriched_practice_location_name_value, enriched_practice_street_line_1_value,
+                enriched_practice_street_line_2_suite_value, enriched_practice_city_value,
+                enriched_practice_zip_value, enriched_practice_state_value,
+                standard_comments, unique_comments,
+                attempt_date_1, attempt_date_2, attempt_date_3
+            ) VALUES (
+                source.record_queue_id, source.caller_id, source.campaign_id, source.caqh_id,
+                source.can_proceed_with_call, source.form_start_time, source.form_submission_time,
+                source.form_total_time_minutes, source.verification_complete,
+                source.provider_currently_practicing_response, source.provider_speciality_category_response,
+                source.phone_number_correct_response, source.practice_location_name_response,
+                source.practice_location_address_response, source.practice_location_suite_response,
+                source.practice_accepting_new_patients_response, source.practice_accepting_new_medicare_patients_response,
+                source.enriched_provider_speciality_category_value, source.enriched_phone_number_value,
+                source.enriched_practice_location_name_value, source.enriched_practice_street_line_1_value,
+                source.enriched_practice_street_line_2_suite_value, source.enriched_practice_city_value,
+                source.enriched_practice_zip_value, source.enriched_practice_state_value,
+                source.standard_comments, source.unique_comments,
+                CURRENT_DATE(), NULL, NULL
+            )
+            """,
+            params,
         )
-        exists = cursor.fetchone()[0] > 0
-
-    if exists:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                f"""
-                UPDATE {CATALOG}.master_responses SET
-                    record_queue_id                                   = %s,
-                    caller_id                                         = %s,
-                    can_proceed_with_call                             = %s,
-                    form_start_time                                   = CAST(%s AS TIMESTAMP),
-                    form_submission_time                              = CAST(%s AS TIMESTAMP),
-                    form_total_time_minutes                           = %s,
-                    verification_complete                             = %s,
-                    provider_currently_practicing_response            = %s,
-                    provider_speciality_category_response             = %s,
-                    phone_number_correct_response                     = %s,
-                    practice_location_name_response                   = %s,
-                    practice_location_address_response                = %s,
-                    practice_location_suite_response                  = %s,
-                    practice_accepting_new_patients_response          = %s,
-                    practice_accepting_new_medicare_patients_response = %s,
-                    enriched_provider_speciality_category_value       = %s,
-                    enriched_phone_number_value                       = %s,
-                    enriched_practice_location_name_value             = %s,
-                    enriched_practice_street_line_1_value             = %s,
-                    enriched_practice_street_line_2_suite_value       = %s,
-                    enriched_practice_city_value                      = %s,
-                    enriched_practice_zip_value                       = %s,
-                    enriched_practice_state_value                     = %s,
-                    standard_comments                                 = %s,
-                    unique_comments                                   = %s,
-                    attempt_date_1 = COALESCE(attempt_date_1, CURRENT_DATE()),
-                    attempt_date_2 = CASE
-                        WHEN attempt_date_1 IS NOT NULL AND attempt_date_2 IS NULL THEN CURRENT_DATE()
-                        ELSE attempt_date_2
-                    END,
-                    attempt_date_3 = CASE
-                        WHEN attempt_date_2 IS NOT NULL AND attempt_date_3 IS NULL THEN CURRENT_DATE()
-                        ELSE attempt_date_3
-                    END
-                WHERE campaign_id = %s AND caqh_id = %s
-                """,
-                params + [row["campaign_id"], row["caqh_id"]],
-            )
-    else:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                f"""
-                INSERT INTO {CATALOG}.master_responses (
-                    record_queue_id, caller_id, campaign_id, caqh_id,
-                    can_proceed_with_call, form_start_time, form_submission_time,
-                    form_total_time_minutes, verification_complete,
-                    provider_currently_practicing_response, provider_speciality_category_response,
-                    phone_number_correct_response, practice_location_name_response,
-                    practice_location_address_response, practice_location_suite_response,
-                    practice_accepting_new_patients_response, practice_accepting_new_medicare_patients_response,
-                    enriched_provider_speciality_category_value, enriched_phone_number_value,
-                    enriched_practice_location_name_value, enriched_practice_street_line_1_value,
-                    enriched_practice_street_line_2_suite_value, enriched_practice_city_value,
-                    enriched_practice_zip_value, enriched_practice_state_value,
-                    standard_comments, unique_comments,
-                    attempt_date_1, attempt_date_2, attempt_date_3
-                ) VALUES (
-                    %s, %s, %s, %s,
-                    %s, CAST(%s AS TIMESTAMP), CAST(%s AS TIMESTAMP),
-                    %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s,
-                    CURRENT_DATE(), NULL, NULL
-                )
-                """,
-                params[:2] + [row["campaign_id"], row["caqh_id"]] + params[2:],
-            )
 
 
 def clear_form_state():
@@ -381,6 +421,14 @@ def snapshot_page_data():
     for key in FORM_KEYS:
         if key in st.session_state:
             snap[key] = st.session_state[key]
+    st.session_state["_form_snap"] = snap
+
+
+def _evict_p3_p4_p5_from_snap():
+    """Remove page 3-5 keys from snap so they write as NULL when can_proceed=No."""
+    snap = st.session_state.get("_form_snap", {})
+    for key in _P3_P4_P5_KEYS:
+        snap.pop(key, None)
     st.session_state["_form_snap"] = snap
 
 
@@ -406,6 +454,7 @@ def cancel_form():
     st.session_state.form_start_time = None
     st.session_state.form_start_epoch = None
     st.session_state.form_page = 1
+    st.session_state.form_prev_page = 5
     st.session_state.current_record = None
     clear_form_state()
     st.rerun()
@@ -466,7 +515,7 @@ def home_page():
     st.divider()
 
     try:
-        record, count = load_next_record()
+        record, count = load_next_record(st.session_state.caller_id, st.session_state.role)
     except Exception:
         st.error("Could not load records from the database. Please wait a moment and refresh the page. If this continues, contact your supervisor.")
         st.stop()
@@ -604,6 +653,9 @@ def survey_page_2():
         else:
             snapshot_page_data()
             if st.session_state.p2_can_continue == "No":
+                # Purge any stale page 3-5 values so they are NULL in the DB,
+                # not leftover from a previous forward pass in this session.
+                _evict_p3_p4_p5_from_snap()
                 st.session_state.form_prev_page = 2
                 st.session_state.form_page = 6
             else:
@@ -830,8 +882,11 @@ def survey_page_6():
 
         rec = st.session_state.current_record
         submission_time = now_text()
-        total_minutes = round((time.time() - st.session_state.form_start_epoch) / 60)
+        # math.ceil ensures a minimum of 1 minute; round() could produce 0 for fast submits.
+        total_minutes = math.ceil((time.time() - st.session_state.form_start_epoch) / 60)
 
+        # Page 6 has no Next button, so this is the only point where p6_* widget
+        # values enter the snap dict. Do NOT remove this call.
         snapshot_page_data()
         snap = st.session_state.get("_form_snap", {})
 
@@ -867,13 +922,16 @@ def survey_page_6():
             "enriched_practice_street_line_2_suite_value":       (snap.get("p4_suite_enrichment") or "").strip() if suite_no else "",
             "enriched_practice_city_value":                      (snap.get("p4_city") or "").strip() if addr_no else "",
             "enriched_practice_zip_value":                       (snap.get("p4_zip") or "").strip() if addr_no else "",
-            "enriched_practice_state_value":                     snap.get("p4_state") or "" if addr_no else "",
+            "enriched_practice_state_value":                     (snap.get("p4_state") or "") if addr_no else "",
             "standard_comments":                                 snap.get("p6_standard_comments") or "",
             "unique_comments":                                   (snap.get("p6_unique_comments") or "").strip(),
         }
 
         upsert_response(row)
         update_queue_record(rec["record_id"], verified)
+
+        # Invalidate the queue cache so the next home-page render picks up the updated record.
+        load_next_record.clear()
 
         st.session_state.form_started = False
         st.session_state.form_start_time = None
@@ -906,12 +964,20 @@ def survey_page():
         5: survey_page_5,
         6: survey_page_6,
     }
+
+    if st.session_state.form_page not in pages:
+        st.error("An unexpected navigation error occurred. Please cancel and start again.")
+        st.stop()
+
     pages[st.session_state.form_page]()
 
 
 # ======================================================
 # ADMIN PAGE
 # ======================================================
+
+ADMIN_ROW_LIMIT = 500
+
 
 def admin_page():
     st.title("Admin Dashboard")
@@ -931,12 +997,14 @@ def admin_page():
     st.subheader("Record Queue")
     with conn.cursor() as cursor:
         cursor.execute(
-            f"SELECT * FROM {CATALOG}.record_queue ORDER BY record_id ASC"
+            f"SELECT * FROM {CATALOG}.record_queue ORDER BY record_id ASC LIMIT {ADMIN_ROW_LIMIT}"
         )
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description]
     df_queue = pd.DataFrame(rows, columns=columns)
-    st.write(f"Total records in queue: **{len(df_queue)}**")
+    st.write(f"Showing **{len(df_queue)}** record(s) (cap: {ADMIN_ROW_LIMIT})")
+    if len(df_queue) == ADMIN_ROW_LIMIT:
+        st.warning(f"Result capped at {ADMIN_ROW_LIMIT} rows. Download the CSV for the full dataset.")
     st.dataframe(df_queue, use_container_width=True, hide_index=True)
     st.download_button(
         label="Download queue CSV",
@@ -950,12 +1018,14 @@ def admin_page():
     st.subheader("Master Responses")
     with conn.cursor() as cursor:
         cursor.execute(
-            f"SELECT * FROM {CATALOG}.master_responses ORDER BY form_submission_time DESC"
+            f"SELECT * FROM {CATALOG}.master_responses ORDER BY form_submission_time DESC LIMIT {ADMIN_ROW_LIMIT}"
         )
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description]
     df_responses = pd.DataFrame(rows, columns=columns)
-    st.write(f"Total responses submitted: **{len(df_responses)}**")
+    st.write(f"Showing **{len(df_responses)}** response(s) (cap: {ADMIN_ROW_LIMIT})")
+    if len(df_responses) == ADMIN_ROW_LIMIT:
+        st.warning(f"Result capped at {ADMIN_ROW_LIMIT} rows. Download the CSV for the full dataset.")
     st.dataframe(df_responses, use_container_width=True, hide_index=True)
     st.download_button(
         label="Download responses CSV",
